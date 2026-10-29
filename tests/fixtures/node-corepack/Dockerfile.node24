@@ -1,0 +1,10 @@
+# The same pattern on an image still pinned to Node 24, whose images bundle
+# corepack. --flip node:24-slim=node:26-slim previews its move to Node 26; the
+# tests use it because node:lts itself has been Node 26 since 2026-10-28.
+FROM node:24-slim
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+WORKDIR /app
+COPY package.json index.js ./
+RUN corepack enable && pnpm install
+EXPOSE 3000
+CMD ["node", "index.js"]

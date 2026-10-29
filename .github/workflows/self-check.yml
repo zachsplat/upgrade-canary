@@ -10,7 +10,9 @@ on:
   workflow_dispatch:
 jobs:
   node-fixed:
-    # corepack installed from npm: passes on node:lts today and on node:26
+    # corepack installed from npm: passes on node:lts, which has been Node 26
+    # since 2026-10-28. The preview finds node:lts-slim and node:26-slim on the
+    # same digest and builds nothing.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -22,8 +24,8 @@ jobs:
           ready-url: http://localhost:3000/health
           flip-preview: "true"
   node-flip-warning:
-    # relies on the corepack that Node images up to 24 bundle: passes today,
-    # reported (not failed) in the node:26 preview
+    # the preview on an image still pinned to Node 24, which bundles corepack:
+    # passes on node:24-slim, reported (not failed) in the node:26-slim preview
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -31,7 +33,26 @@ jobs:
         with:
           name: node-corepack-flip
           context: tests/fixtures/node-corepack
-          dockerfile: tests/fixtures/node-corepack/Dockerfile
+          dockerfile: tests/fixtures/node-corepack/Dockerfile.node24
           ready-url: http://localhost:3000/health
-          flip-preview: "true"
+          flips: node:24-slim=node:26-slim
           flip-warn-only: "true"
+  node-unfixed:
+    # relies on the corepack that Node images up to 24 bundle, so since
+    # 2026-10-28 its build on node:lts fails with "corepack: not found". That
+    # failure is the expected result: this job fails only if the canary passes
+    # the fixture or fails it for another reason.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the canary on the unfixed fixture (expected to fail)
+        run: |
+          echo "Expected result: the build fails with \`corepack: not found\` (node:lts has been Node 26 since 2026-10-28)." >>"$GITHUB_STEP_SUMMARY"
+          rc=0
+          ./canary.sh --state-dir "$RUNNER_TEMP/canary-state" --name node-corepack-unfixed \
+            --ready-url http://localhost:3000/health \
+            -f tests/fixtures/node-corepack/Dockerfile tests/fixtures/node-corepack >"$RUNNER_TEMP/summary.md" || rc=$?
+          cat "$RUNNER_TEMP/summary.md"
+          if [ "$rc" != 1 ]; then echo "expected exit 1 (a check failed), got $rc"; exit 1; fi
+          grep -qF 'corepack: not found' "$RUNNER_TEMP/summary.md" || { echo "the failure is not corepack: not found"; exit 1; }
+          echo "failed as expected: corepack: not found"

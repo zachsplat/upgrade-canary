@@ -5,8 +5,8 @@
 #
 # Needs what canary.sh needs (Docker with buildx, jq). The builds are small
 # (busybox, Alpine, Debian slim, Node slim, Ubuntu); the node and ubuntu tests
-# also build a flip preview, and lookup_error, lookup_retry and python_rc
-# answer registry lookups from a stand-in (tests/fixtures/stub-registry). Set
+# also build a flip preview, and lookup_error, lookup_retry, node_moved and
+# python_rc answer registry lookups from a stand-in (tests/fixtures/stub-registry). Set
 # CANARY_REGISTRY_MIRROR=mirror.gcr.io if Docker Hub rate limits get in the
 # way, and KEEP_IMAGES=1 to keep the test images.
 
@@ -101,8 +101,11 @@ t_buildlog() {
 
 t_flip_plan() {
 	run flip-plan 0 --flip-plan -f "$FX/flip-plan/Dockerfile" "$FX/flip-plan"
-	has flip-plan '| 3 | `node:lts` | `node:26` | flip |'
-	has flip-plan '| 4 | `node:lts-slim` | `node:26-slim` | flip |'
+	# the node rule's target; whether the registry gives flip or same (node:lts
+	# has been node:26 since 2026-10-28) is checked against a stand-in in
+	# t_node_moved, so this test does not depend on where the tags point today
+	has flip-plan '| 3 | `node:lts` | `node:26` |'
+	has flip-plan '| 4 | `node:lts-slim` | `node:26-slim` |'
 	has flip-plan '`ubuntu:26.04`'
 	# python:3-slim previews the next minor, or none until it has a release
 	# candidate; t_python_rc checks both against a stand-in registry
@@ -188,6 +191,26 @@ t_lookup_retry() {
 	lacks lookup-once 'tried'
 	CANARY_LOOKUP_RETRY="2 x" run lookup-bad-value 2 --flip-plan -f "$T/one-from/Dockerfile" "$T/one-from"
 	logs lookup-bad-value "CANARY_LOOKUP_RETRY takes waits in whole seconds, got 'x'"
+}
+
+# node:lts-slim against node:26-slim from a stand-in: different digests plan
+# as a flip (before 2026-10-28), the same digest as same, and a run then has
+# nothing to preview (since 2026-10-28).
+t_node_moved() {
+	local d=$T/node-moved a=sha256:3333333333333333333333333333333333333333333333333333333333333333 b=sha256:4444444444444444444444444444444444444444444444444444444444444444
+	mkdir -p "$d"
+	echo 'FROM node:lts-slim' >"$d/Dockerfile"
+	printf '%s\n' "node:lts-slim $a -" "node:26-slim $b -" >"$d/before.tsv"
+	printf '%s\n' "node:lts-slim $b -" "node:26-slim $b -" >"$d/moved.tsv"
+	STUB_REGISTRY=$d/before.tsv PATH=$STUB:$PATH CANARY_REGISTRY_MIRROR= \
+		run node-before 0 --flip-plan -f "$d/Dockerfile" "$d"
+	has node-before '| 1 | `node:lts-slim` | `node:26-slim` | flip |'
+	STUB_REGISTRY=$d/moved.tsv PATH=$STUB:$PATH CANARY_REGISTRY_MIRROR= \
+		run node-moved 0 --flip-plan -f "$d/Dockerfile" "$d"
+	has node-moved '| 1 | `node:lts-slim` | `node:26-slim` | same | already the same image (444444444444) |'
+	STUB_REGISTRY=$d/moved.tsv PATH=$STUB:$PATH CANARY_REGISTRY_MIRROR= \
+		run node-moved-run 0 --image "$HELPER" -f "$d/Dockerfile" --flip-preview --no-elf --no-start --sbom none
+	has node-moved-run "Nothing to preview: no FROM line moves to a different image."
 }
 
 # python:3 previews the 3.(N+1)-rc tag only once it holds a release candidate.
@@ -302,12 +325,17 @@ t_smoke_split() {
 	done
 }
 
+# The preview end to end: the corepack fixture pinned to Node 24, previewed on
+# Node 26 with --flip, since node:lts itself is node:26 now (t_node_moved).
+# The fixed Dockerfile passes on node:lts whichever line it points at.
 t_node_flip() {
-	run node-flip 3 --tag "$P/node-corepack:test" --flip-preview --ready-url http://localhost:3000/health "$FX/node-corepack"
+	local df=$FX/node-corepack/Dockerfile.node24
+	run node-flip 3 --tag "$P/node-corepack:test" -f "$df" --flip node:24-slim=node:26-slim --ready-url http://localhost:3000/health "$FX/node-corepack"
 	has node-flip "PASS now, FAIL in the flip preview"
-	has node-flip '`node:lts-slim` | `node:26-slim` | flip'
+	has node-flip '| 4 | `node:24-slim` | `node:26-slim` | flip | your --flip |'
 	has node-flip "corepack: not found"
-	run node-flip-warn 0 --tag "$P/node-corepack:test2" --flip-preview --flip-warn-only --ready-url http://localhost:3000/health "$FX/node-corepack"
+	run node-flip-warn 0 --tag "$P/node-corepack:test2" -f "$df" --flip node:24-slim=node:26-slim --flip-warn-only --ready-url http://localhost:3000/health "$FX/node-corepack"
+	run node-fixed 0 --tag "$P/node-corepack:test3" -f "$FX/node-corepack/Dockerfile.fixed" --ready-url http://localhost:3000/health "$FX/node-corepack"
 }
 
 t_ubuntu_flip() {
@@ -317,7 +345,7 @@ t_ubuntu_flip() {
 	has ubuntu-back "#### Packages, now against the preview"
 }
 
-ALL=(pkgdiff buildlog smoke_split flip_plan lookup_error lookup_retry python_rc ok_musl missing_lib wrong_libc cachemount start_modes node_flip ubuntu_flip)
+ALL=(pkgdiff buildlog smoke_split flip_plan lookup_error lookup_retry node_moved python_rc ok_musl missing_lib wrong_libc cachemount start_modes node_flip ubuntu_flip)
 if [ "${1:-}" = --list ]; then printf '%s\n' "${ALL[@]}"; exit 0; fi
 [ $# -gt 0 ] && ALL=("$@")
 
